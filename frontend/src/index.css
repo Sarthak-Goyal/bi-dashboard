@@ -1,0 +1,146 @@
+/* ─── Design Tokens ─────────────────────────────────────────────────── */
+:root {
+  /* Background layers */
+  --bg-primary: #080f1e;
+  --bg-secondary: #0e1929;
+  --bg-card: #111f35;
+  --bg-card-hover: #162844;
+  --bg-glass: rgba(17, 31, 53, 0.6);
+
+  /* Accents */
+  --teal: #00d4c8;
+  --teal-dim: rgba(0, 212, 200, 0.15);
+  --teal-glow: rgba(0, 212, 200, 0.35);
+  --amber: #f5a623;
+  --amber-dim: rgba(245, 166, 35, 0.15);
+  --red: #ff4d6a;
+  --red-dim: rgba(255, 77, 106, 0.15);
+  --green: #22d3a0;
+  --green-dim: rgba(34, 211, 160, 0.15);
+
+  /* Text */
+  --text-primary: #e8f0ff;
+  --text-secondary: #7a93b8;
+  --text-muted: #3d5470;
+
+  /* Borders */
+  --border: rgba(255, 255, 255, 0.07);
+  --border-accent: rgba(0, 212, 200, 0.3);
+
+  /* Typography */
+  --font-display: "Space Grotesk", sans-serif;
+  --font-body: "Inter", sans-serif;
+  --font-mono: "JetBrains Mono", monospace;
+
+  /* Shadows */
+  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.4), 0 0 0 1px var(--border);
+  --shadow-glow: 0 0 20px var(--teal-glow);
+}
+
+/* ─── Reset / Base ──────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { font-size: 16px; -webkit-font-smoothing: antialiased; }
+
+body {
+  font-family: var(--font-body);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  min-height: 100vh;
+  line-height: 1.5;
+}
+
+/* ─── Scrollbar ─────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--bg-secondary); }
+::-webkit-scrollbar-thumb { background: var(--text-muted); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-secondary); }
+
+/* ─── Layout ────────────────────────────────────────────────────────── */
+.layout {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  grid-template-rows: 52px 1fr;
+  min-height: 100vh;
+}
+
+.topbar {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 24px;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 50;
+}
+
+.sidebar {
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border);
+  padding: 20px 0;
+  position: sticky;
+  top: 52px;
+  height: calc(100vh - 52px);
+  overflow-y: auto;
+}
+
+.main-content {
+  padding: 24px;
+  overflow-x: hidden;
+}
+
+/* ─── Cards ─────────────────────────────────────────────────────────── */
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px;
+  transition: border-color 0.2s;
+}
+.card:hover { border-color: rgba(255,255,255,0.12); }
+
+/* ─── Typography ─────────────────────────────────────────────────────── */
+.font-display { font-family: var(--font-display); }
+.font-mono    { font-family: var(--font-mono); }
+
+/* ─── Pipeline flow animation ───────────────────────────────────────── */
+@keyframes flow {
+  0%   { transform: translateX(-100%); opacity: 0; }
+  20%  { opacity: 1; }
+  80%  { opacity: 1; }
+  100% { transform: translateX(300%); opacity: 0; }
+}
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%       { opacity: 0.4; transform: scale(0.7); }
+}
+@keyframes shimmer {
+  0%   { background-position: -200% center; }
+  100% { background-position: 200% center; }
+}
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fadein { animation: fadeIn 0.4s ease both; }
+
+/* ─── Recharts overrides ─────────────────────────────────────────────── */
+.recharts-tooltip-wrapper { outline: none !important; }
+.recharts-default-tooltip {
+  background: #162844 !important;
+  border: 1px solid var(--border-accent) !important;
+  border-radius: 8px !important;
+  font-family: var(--font-body) !important;
+  font-size: 13px !important;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.5) !important;
+}
+.recharts-tooltip-label {
+  color: var(--teal) !important;
+  font-family: var(--font-mono) !important;
+  margin-bottom: 4px !important;
+}
+.recharts-legend-item-text { color: var(--text-secondary) !important; font-size: 12px !important; }
