@@ -59,3 +59,22 @@ export function useOnce(fetchFn, deps = []) {
 
   return { data, loading, error, refetch: fetchData };
 }
+
+/**
+ * useHashPage — tiny hash router so each page has a shareable URL (#crime) and
+ * the browser back button / refresh keep working.
+ */
+export function useHashPage(valid, fallback = "overview") {
+  const read = () => {
+    const h = window.location.hash.replace(/^#\/?/, "");
+    return valid.includes(h) ? h : fallback;
+  };
+  const [page, setPage] = useState(read);
+  useEffect(() => {
+    const onHash = () => setPage(read());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const go = useCallback((next) => { window.location.hash = next; }, []);
+  return [page, go];
+}

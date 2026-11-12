@@ -1,0 +1,10 @@
+NSW local government area boundaries (nsw_lga.geojson)
+
+Source: Australian Bureau of Statistics, "Australian Statistical Geography Standard (ASGS) Edition 3",
+Jul2021-Jun2026 (2025 update), LGA 2024 boundaries.
+https://www.abs.gov.au/statistics/standards/australian-statistical-geography-standard-asgs-edition-3/jul2021-jun2026
+Licence: Creative Commons Attribution 4.0 International. (c) Commonwealth of Australia 2021-2025.
+
+Obtained via the `nswgeo` R package (https://github.com/cidm-ph/nswgeo), which simplifies the geometry
+(750 m tolerance). Further simplified here (~400 m) and re-wound for D3 to keep the file small.
+Names have the " (NSW)" suffix removed. Two non-spatial categories (no usual address; migratory) are omitted.

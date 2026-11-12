@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    name: Backend tests (${{ matrix.db }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        db: [sqlite, postgres]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: bi
+          POSTGRES_PASSWORD: bi
+          POSTGRES_DB: bitest
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U bi -d bitest"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - name: Import check
+        run: python -c "from app.main import app; print('routes:', len(app.routes))"
+        env:
+          RUN_PIPELINES_ON_STARTUP: "off"
+          ENABLE_SCHEDULER: "false"
+          DATA_DIR: ${{ runner.temp }}/bi-data
+      - name: Tests
+        run: python -m pytest -q
+        env:
+          TEST_DATABASE_URL: ${{ matrix.db == 'postgres' && 'postgresql://bi:bi@localhost:5432/bitest' || '' }}
+
+  frontend:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run build
+
+  docker:
+    name: Docker image builds and starts
+    runs-on: ubuntu-latest
+    needs: [backend, frontend]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t bi-dashboard .
+      - name: Smoke test
+        run: |
+          docker run -d --name bi -p 8000:8000 -e RUN_PIPELINES_ON_STARTUP=off -e ENABLE_SCHEDULER=false bi-dashboard
+          for i in $(seq 1 30); do curl -sf localhost:8000/health && break || sleep 2; done
+          curl -sf localhost:8000/health
+          curl -sf localhost:8000/ | grep -qi "<div id=\"root\">"
+          test "$(docker exec bi id -u)" != "0"        # not running as root
+      - name: Logs on failure
+        if: failure()
+        run: docker logs bi

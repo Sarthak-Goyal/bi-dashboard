@@ -18,5 +18,16 @@ export default defineConfig({
   },
   build: {
     outDir: "dist",
+    chunkSizeWarningLimit: 700,   // recharts is large by nature; it sits in its own cached chunk
+    rollupOptions: {
+      output: {
+        // keep the app bundle small: heavy libraries get their own cached chunks
+        manualChunks: {
+          react: ["react", "react-dom"],
+          charts: ["recharts"],
+          geo: ["d3-geo"],
+        },
+      },
+    },
   },
 });

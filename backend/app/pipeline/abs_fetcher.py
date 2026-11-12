@@ -1,283 +1,163 @@
 """
-ABS Data API fetcher.
+ABS Data API pipelines (SDMX-JSON): Labour Force, CPI, Building Approvals.
 Source: https://api.data.abs.gov.au/
-Docs:   https://www.abs.gov.au/about/data-services/application-programming-interfaces-apis
 
-The ABS uses SDMX 2.1 REST format. Responses are SDMX-JSON with a nested
-structure: data.dataSets[0].series["dim0:dim1:..."].observations{"t": [value]}
+All three run through the generic incremental engine in engine.py.
 """
 
 import logging
-from datetime import datetime, timezone
 from typing import Optional
 
-import httpx
 import pandas as pd
 from sqlalchemy.orm import Session
 
-from app.models import LabourForceRecord, CPIRecord, PipelineRun
+from app.config import get_settings
+from app.models import BuildingApprovalRecord, CPIRecord, LabourForceRecord, PipelineRun
+from app.pipeline import common, sample_data
+from app.pipeline.engine import EtlJob, run_etl
+from app.pipeline.quality import Spec
+from app.pipeline.sdmx import parse_sdmx_json
 
 logger = logging.getLogger(__name__)
 
-ABS_BASE = "https://api.data.abs.gov.au/data"
-TIMEOUT = 30.0
 
-# ---------------------------------------------------------
-# SDMX-JSON parser
-# ---------------------------------------------------------
+def _abs_fetch(path: str):
+    def fetch(start: str) -> pd.DataFrame:
+        url = f"{get_settings().abs_base_url}/{path}?startPeriod={start}&format=jsondata"
+        return parse_sdmx_json(common.http_get_json(url, headers=common.ABS_HEADERS))
+    return fetch
 
-def parse_sdmx_json(payload: dict) -> pd.DataFrame:
+
+# ── Labour Force ─────────────────────────────────────────────────────────────
+# Dataflow LF, key M6+M7.20.1+9.3.1599.M  (measure.tsest.region.sex.age.freq)
+# M6 = unemployment rate, M7 = participation rate; region 1 = NSW, 9 = Australia
+
+_MEASURES = {"Unemployment rate": "unemployment_rate", "Participation rate": "participation_rate"}
+_REGIONS = {"New South Wales": "NSW", "Australia": "AUS"}
+
+
+def _labour_prepare(raw: pd.DataFrame) -> pd.DataFrame:
+    if raw.empty:
+        return raw
+    df = raw.copy()
+    df["metric"] = df.get("MEASURE", pd.Series(dtype=str)).map(_MEASURES)
+    df["region"] = df.get("REGION", pd.Series(dtype=str)).map(_REGIONS)
+    return df.dropna(subset=["metric", "region"])[["period", "region", "metric", "value"]]
+
+
+def _labour_rows(db: Session, df: pd.DataFrame) -> list[dict]:
+    return [dict(period=r.period, region=r.region, metric=r.metric, value=float(r.value),
+                 adjustment="Seasonally Adjusted", unit="%") for r in df.itertuples()]
+
+
+LABOUR_JOB = EtlJob(
+    name="abs_labour_force", label="ABS Labour Force",
+    source_url="https://api.data.abs.gov.au/data/LF/M6+M7.20.1+9.3.1599.M",
+    model=LabourForceRecord, key_fields=("period", "region", "metric"), value_fields=("value",),
+    watermark_col=LabourForceRecord.period, freq="M", default_start="2020-01", lookback=3,
+    quality=Spec("labour_force", group_cols=("region", "metric"), freq="M", min_value=0, max_value=100,
+                 required_cols=("region", "metric")),
+    fetch=_abs_fetch("LF/M6+M7.20.1+9.3.1599.M"),
+    prepare=_labour_prepare, to_rows=_labour_rows,
+    window=lambda start: LabourForceRecord.period >= start,
+    sample_rows=sample_data.sample_labour_force,
+)
+
+
+# ── CPI ──────────────────────────────────────────────────────────────────────
+# Dataflow CPI, key 1.1.10.Q  (index 1 = All groups, region 10 = Sydney)
+
+def _cpi_prepare(raw: pd.DataFrame) -> pd.DataFrame:
+    return raw[["period", "value"]] if not raw.empty else raw
+
+
+def _cpi_rows(db: Session, df: pd.DataFrame) -> list[dict]:
     """
-    Convert ABS SDMX-JSON response into a tidy DataFrame.
-    Returns columns: period, value, plus any dimension columns found.
+    Annual % change needs the value four quarters earlier, which may lie outside
+    an incremental fetch window — so merge in what is already stored first.
     """
-    structure = payload["data"]["structure"]
-    datasets = payload["data"]["dataSets"]
-
-    # Build time periods list from observation dimension
-    obs_dims = structure["dimensions"]["observation"]
-    time_dim = next((d for d in obs_dims if d.get("id") in ("TIME_PERIOD", "TIME")), obs_dims[0])
-    periods = [v["id"] for v in time_dim["values"]]
-
-    # Build series dimension labels
-    series_dims = structure["dimensions"]["series"]
-
+    stored = {r.period: r.index_value for r in db.query(CPIRecord)
+              .filter(CPIRecord.is_synthetic.is_(False)).all()}
+    fetched = {r.period: float(r.value) for r in df.itertuples()}
+    combined = {**stored, **fetched}
+    ordered = sorted(combined)
     rows = []
-    for series_key, series_data in datasets[0]["series"].items():
-        # Decode each dimension index for this series
-        idx_parts = [int(i) for i in series_key.split(":")]
-        dim_labels = {}
-        for i, dim in enumerate(series_dims):
-            try:
-                dim_labels[dim["id"]] = dim["values"][idx_parts[i]]["name"]
-            except (IndexError, KeyError):
-                dim_labels[dim["id"]] = str(idx_parts[i])
-
-        # Each observation key is the time index
-        for t_str, obs_vals in series_data.get("observations", {}).items():
-            t_idx = int(t_str)
-            value = obs_vals[0] if obs_vals else None
-            if value is not None and t_idx < len(periods):
-                rows.append({**dim_labels, "period": periods[t_idx], "value": float(value)})
-
-    return pd.DataFrame(rows)
+    for i, period in enumerate(ordered):
+        if period not in fetched:
+            continue
+        prior = combined[ordered[i - 4]] if i >= 4 else None
+        pct = round((combined[period] / prior - 1) * 100, 2) if prior else None
+        rows.append(dict(period=period, region="Sydney", series="All Groups CPI",
+                         index_value=round(combined[period], 1), pct_change_annual=pct))
+    return rows
 
 
-# ---------------------------------------------------------
-# Labour Force pipeline
-# ---------------------------------------------------------
+CPI_JOB = EtlJob(
+    name="abs_cpi", label="ABS CPI",
+    source_url="https://api.data.abs.gov.au/data/CPI/1.1.10.Q",
+    model=CPIRecord, key_fields=("period", "region", "series"), value_fields=("index_value", "pct_change_annual"),
+    watermark_col=CPIRecord.period, freq="Q", default_start="2020-Q1", lookback=6,
+    quality=Spec("cpi", freq="Q", min_value=20, max_value=1000),
+    fetch=_abs_fetch("CPI/1.1.10.Q"),
+    prepare=_cpi_prepare, to_rows=_cpi_rows,
+    window=lambda start: CPIRecord.period >= start,
+    sample_rows=sample_data.sample_cpi,
+)
 
-def fetch_labour_force(db: Session, start_period: str = "2020-01") -> PipelineRun:
-    """
-    Fetch NSW & Australia unemployment rate + participation rate
-    from the ABS Labour Force survey (monthly, seasonally adjusted).
 
-    Dataflow: LF
-    Key:      M6+M7   .20     .1+9   .3     .1599  .M
-              measure  tsest   region  sex    age    freq
-    M6 = Unemployment rate, M7 = Participation rate
-    Region 1 = NSW, 9 = AUS
-    """
-    url = (
-        f"{ABS_BASE}/LF/M6+M7.20.1+9.3.1599.M"
-        f"?startPeriod={start_period}&format=jsondata"
+# ── Building Approvals ───────────────────────────────────────────────────────
+# Dataflow BA_GCCSA (monthly). The exact series key is not hard-coded: the whole
+# flow is requested and filtered by dimension *labels*, so a reordered key does not
+# break it. NOTE: this endpoint is unverified against the live API — if the labels
+# change the quality layer/audit log report it and the pipeline falls back to sample data.
+
+def _ba_prepare(raw: pd.DataFrame) -> pd.DataFrame:
+    if raw.empty:
+        return raw
+    dims = [c for c in raw.columns if c not in ("period", "value")]
+    text = raw[dims].astype(str).apply(lambda col: col.str.lower())
+    joined = text.agg(" | ".join, axis=1)
+    mask = (
+        joined.str.contains("new south wales")
+        & joined.str.contains("dwelling")
+        & joined.str.contains("total")
+        & ~joined.str.contains("value")
     )
-
-    run = PipelineRun(
-        pipeline_name="abs_labour_force",
-        status="running",
-        source_url=url,
-    )
-    db.add(run)
-    db.commit()
-    db.refresh(run)
-
-    try:
-        logger.info(f"[ABS Labour Force] Fetching {url}")
-        with httpx.Client(timeout=TIMEOUT) as client:
-            resp = client.get(url, headers={"Accept": "application/vnd.sdmx.data+json;version=1.0"})
-            resp.raise_for_status()
-            payload = resp.json()
-
-        df = parse_sdmx_json(payload)
-        if df.empty:
-            raise ValueError("Parsed DataFrame is empty — check API key / dimensions")
-
-        # Map ABS measure names to our internal metric names
-        measure_map = {
-            "Unemployment rate": "unemployment_rate",
-            "Participation rate": "participation_rate",
-        }
-        region_map = {
-            "New South Wales": "NSW",
-            "Australia": "AUS",
-        }
-
-        records_inserted = 0
-        for _, row in df.iterrows():
-            metric = measure_map.get(row.get("MEASURE", ""), row.get("MEASURE", "unknown"))
-            region = region_map.get(row.get("REGION", ""), row.get("REGION", "UNK"))
-
-            # Upsert: delete existing record for same period/region/metric then insert
-            db.query(LabourForceRecord).filter(
-                LabourForceRecord.period == row["period"],
-                LabourForceRecord.region == region,
-                LabourForceRecord.metric == metric,
-            ).delete()
-
-            db.add(LabourForceRecord(
-                period=row["period"],
-                region=region,
-                metric=metric,
-                value=row["value"],
-                adjustment="Seasonally Adjusted",
-                unit="%",
-            ))
-            records_inserted += 1
-
-        db.commit()
-
-        run.status = "success"
-        run.records_fetched = len(df)
-        run.records_inserted = records_inserted
-        run.completed_at = datetime.now(timezone.utc)
-        db.commit()
-        logger.info(f"[ABS Labour Force] ✓ Inserted {records_inserted} records")
-
-    except Exception as exc:
-        logger.error(f"[ABS Labour Force] ✗ {exc}")
-        run.status = "failed"
-        run.error_message = str(exc)
-        run.completed_at = datetime.now(timezone.utc)
-        db.commit()
-        _seed_mock_labour_force(db)
-
-    return run
+    df = raw[mask].copy()
+    if df.empty:
+        return df
+    # Several adjustment types may remain (original / seasonally adjusted / trend); prefer "original"
+    j = joined[mask]
+    df["_rank"] = j.str.contains("original").map({True: 0, False: 1})
+    df = df.sort_values(["period", "_rank"]).drop_duplicates("period", keep="first")
+    return df[["period", "value"]]
 
 
-def _seed_mock_labour_force(db: Session) -> None:
-    """Fallback mock data so the dashboard never shows empty state."""
-    # Only seed if table is empty
-    if db.query(LabourForceRecord).count() > 0:
-        return
-    logger.warning("[ABS Labour Force] Seeding mock data")
-    import random
-    random.seed(42)
-    base_unemp = {"NSW": 3.8, "AUS": 4.1}
-    base_part = {"NSW": 66.2, "AUS": 66.8}
-    for year in range(2021, 2025):
-        for month in range(1, 13):
-            period = f"{year}-{month:02d}"
-            for region in ["NSW", "AUS"]:
-                drift = random.uniform(-0.15, 0.15)
-                db.add(LabourForceRecord(period=period, region=region,
-                    metric="unemployment_rate",
-                    value=round(base_unemp[region] + drift, 2), unit="%"))
-                db.add(LabourForceRecord(period=period, region=region,
-                    metric="participation_rate",
-                    value=round(base_part[region] + drift * 0.5, 2), unit="%"))
-    db.commit()
+def _ba_rows(db: Session, df: pd.DataFrame) -> list[dict]:
+    return [dict(period=r.period, region="NSW", building_type="Total dwelling units",
+                 value=float(r.value), unit="dwellings") for r in df.itertuples()]
 
 
-# ---------------------------------------------------------
-# CPI pipeline
-# ---------------------------------------------------------
-
-def fetch_cpi(db: Session, start_period: str = "2020-Q1") -> PipelineRun:
-    """
-    Fetch Sydney All Groups CPI from ABS (quarterly).
-
-    Dataflow: CPI
-    Key:      1    .1     .10      .Q
-              meas  index  region  freq
-    Index 1 = All Groups CPI, Region 10 = Sydney
-    """
-    url = (
-        f"{ABS_BASE}/CPI/1.1.10.Q"
-        f"?startPeriod={start_period}&format=jsondata"
-    )
-
-    run = PipelineRun(
-        pipeline_name="abs_cpi",
-        status="running",
-        source_url=url,
-    )
-    db.add(run)
-    db.commit()
-    db.refresh(run)
-
-    try:
-        logger.info(f"[ABS CPI] Fetching {url}")
-        with httpx.Client(timeout=TIMEOUT) as client:
-            resp = client.get(url, headers={"Accept": "application/vnd.sdmx.data+json;version=1.0"})
-            resp.raise_for_status()
-            payload = resp.json()
-
-        df = parse_sdmx_json(payload)
-        if df.empty:
-            raise ValueError("Parsed DataFrame is empty")
-
-        df_sorted = df.sort_values("period")
-
-        records_inserted = 0
-        prev_val: Optional[float] = None
-        year_ago_val: Optional[float] = None
-        history: list[float] = []
-
-        for _, row in df_sorted.iterrows():
-            val = row["value"]
-            # Annual % change: compare to value 4 quarters ago
-            year_ago_val = history[-4] if len(history) >= 4 else None
-            pct_annual = round(((val - year_ago_val) / year_ago_val) * 100, 2) if year_ago_val else None
-
-            db.query(CPIRecord).filter(
-                CPIRecord.period == row["period"],
-                CPIRecord.region == "Sydney",
-            ).delete()
-
-            db.add(CPIRecord(
-                period=row["period"],
-                region="Sydney",
-                series="All Groups CPI",
-                index_value=round(val, 1),
-                pct_change_annual=pct_annual,
-            ))
-            history.append(val)
-            records_inserted += 1
-
-        db.commit()
-
-        run.status = "success"
-        run.records_fetched = len(df)
-        run.records_inserted = records_inserted
-        run.completed_at = datetime.now(timezone.utc)
-        db.commit()
-        logger.info(f"[ABS CPI] ✓ Inserted {records_inserted} records")
-
-    except Exception as exc:
-        logger.error(f"[ABS CPI] ✗ {exc}")
-        run.status = "failed"
-        run.error_message = str(exc)
-        run.completed_at = datetime.now(timezone.utc)
-        db.commit()
-        _seed_mock_cpi(db)
-
-    return run
+BUILDING_JOB = EtlJob(
+    name="abs_building_approvals", label="ABS Building Approvals",
+    source_url="https://api.data.abs.gov.au/data/BA_GCCSA",
+    model=BuildingApprovalRecord, key_fields=("period", "region", "building_type"), value_fields=("value",),
+    watermark_col=BuildingApprovalRecord.period, freq="M", default_start="2020-01", lookback=3,
+    quality=Spec("building_approvals", freq="M", min_value=0, max_value=100_000),
+    fetch=_abs_fetch("BA_GCCSA/all"),
+    prepare=_ba_prepare, to_rows=_ba_rows,
+    window=lambda start: BuildingApprovalRecord.period >= start,
+    sample_rows=sample_data.sample_building_approvals,
+)
 
 
-def _seed_mock_cpi(db: Session) -> None:
-    if db.query(CPIRecord).count() > 0:
-        return
-    logger.warning("[ABS CPI] Seeding mock data")
-    base = 113.2
-    quarters = []
-    for year in range(2020, 2025):
-        for q in range(1, 5):
-            quarters.append(f"{year}-Q{q}")
-    for i, period in enumerate(quarters):
-        base += round(0.6 + (0.8 if 8 <= i <= 14 else 0), 1)
-        year_ago = base - 2.4 if i >= 4 else None
-        pct = round(((base - year_ago) / year_ago) * 100, 2) if year_ago else None
-        db.add(CPIRecord(period=period, region="Sydney",
-            series="All Groups CPI", index_value=round(base, 1), pct_change_annual=pct))
-    db.commit()
+def fetch_labour_force(db: Session) -> PipelineRun:
+    return run_etl(db, LABOUR_JOB)
+
+
+def fetch_cpi(db: Session) -> PipelineRun:
+    return run_etl(db, CPI_JOB)
+
+
+def fetch_building_approvals(db: Session) -> PipelineRun:
+    return run_etl(db, BUILDING_JOB)

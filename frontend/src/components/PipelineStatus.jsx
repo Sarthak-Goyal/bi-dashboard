@@ -25,10 +25,16 @@ const StatusIcon = ({ status, size = 14 }) => {
 export default function PipelineStatus() {
   const { data, loading, refetch } = usePolling(() => api.getPipelineStatus(), 15_000);
   const [triggering, setTriggering] = useState(false);
+  const [refreshError, setRefreshError] = useState(null);
 
   async function handleRefresh() {
     setTriggering(true);
-    try { await api.triggerRefresh("all"); } catch {}
+    setRefreshError(null);
+    try {
+      await api.triggerRefresh("all");
+    } catch (e) {
+      setRefreshError(e.status === 401 ? "Refresh needs an API key (set VITE_API_KEY)" : "Couldn’t trigger refresh");
+    }
     setTimeout(() => { setTriggering(false); refetch(); }, 2000);
   }
 
@@ -36,17 +42,9 @@ export default function PipelineStatus() {
   const health = data?.overall_health ?? "initialising";
 
   return (
-    <div style={{
-      background: "var(--bg-card)",
-      borderBottom: "1px solid var(--border)",
-      padding: "10px 24px",
-      display: "flex",
-      alignItems: "center",
-      gap: 24,
-      flexWrap: "wrap",
-    }}>
+    <div className="statusbar">
       {/* Pipeline flow diagram */}
-      <div style={{ display: "flex", alignItems: "center", gap: 0, flexShrink: 0 }}>
+      <div className="pipeline-stages" style={{ display: "flex", alignItems: "center", gap: 0, flexShrink: 0 }}>
         <span style={{ fontSize: 11, color: "var(--text-muted)", marginRight: 10, fontFamily: "var(--font-mono)", letterSpacing: "0.05em" }}>
           PIPELINE
         </span>
@@ -88,7 +86,7 @@ export default function PipelineStatus() {
       </div>
 
       {/* Divider */}
-      <div style={{ width: 1, height: 28, background: "var(--border)", flexShrink: 0 }} />
+      <div className="pipeline-stages" style={{ width: 1, height: 28, background: "var(--border)", flexShrink: 0 }} />
 
       {/* Individual pipeline statuses */}
       <div style={{ display: "flex", gap: 16, alignItems: "center", flex: 1, flexWrap: "wrap" }}>
@@ -100,9 +98,10 @@ export default function PipelineStatus() {
             <div>
               <div style={{ fontSize: 11, color: "var(--text-secondary)", fontFamily: "var(--font-mono)", lineHeight: 1 }}>
                 {p.display_name}
+                {p.mode === "sample" && <span className="pill pill-amber" style={{ marginLeft: 6 }}>sample</span>}
               </div>
               {p.last_run && (
-                <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 1 }}>
+                <div className="pipe-meta" style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 1 }}>
                   {formatDistanceToNow(new Date(p.last_run), { addSuffix: true })}
                   {p.records_inserted > 0 && ` · ${p.records_inserted.toLocaleString()} rows`}
                 </div>
@@ -114,6 +113,7 @@ export default function PipelineStatus() {
 
       {/* Refresh button */}
       <button
+        type="button"
         onClick={handleRefresh}
         disabled={triggering}
         style={{
@@ -125,11 +125,11 @@ export default function PipelineStatus() {
           flexShrink: 0,
         }}
       >
-        <RefreshCw size={12} style={{ animation: triggering ? "spin 1s linear infinite" : "none" }} />
+        <RefreshCw size={12} aria-hidden="true" style={{ animation: triggering ? "spin 1s linear infinite" : "none" }} />
         {triggering ? "Triggering…" : "Refresh All"}
       </button>
+      {refreshError && <span role="alert" style={{ fontSize: 11, color: "var(--amber)" }}>{refreshError}</span>}
 
-      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
     </div>
   );
 }

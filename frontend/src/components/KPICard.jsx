@@ -28,13 +28,14 @@ function Delta({ value, unit = "", invertGood = false }) {
  *   period       string   — data period
  *   accent       string   — CSS colour var for left border
  *   invertGood   bool     — if true, positive delta = bad (e.g. unemployment)
+ *   integer      bool     — counts (dwellings, incidents): never show decimals
  *   loading      bool
  *   icon         node
  */
 export default function KPICard({
   label, value, unit = "", delta = null, deltaUnit = "",
   description, period, accent = "var(--teal)", invertGood = false,
-  loading = false, icon, large = false,
+  loading = false, icon, large = false, integer = false,
 }) {
   return (
     <div style={{
@@ -65,7 +66,7 @@ export default function KPICard({
 
       {/* Main value */}
       {loading ? (
-        <div style={{ height: large ? 44 : 36, background: "linear-gradient(90deg, var(--bg-card-hover) 25%, var(--bg-secondary) 50%, var(--bg-card-hover) 75%)", backgroundSize: "200% 100%", animation: "shimmer 1.5s infinite", borderRadius: 6 }} />
+        <div className="skeleton" role="status" aria-label="Loading value" style={{ height: large ? 44 : 36, borderRadius: 6 }} />
       ) : (
         <div style={{ display: "flex", alignItems: "baseline", gap: 4 }}>
           <span style={{
@@ -77,8 +78,8 @@ export default function KPICard({
             letterSpacing: "-0.02em",
           }}>
             {value !== null && value !== undefined
-              ? typeof value === "number" && value > 10000
-                ? value.toLocaleString()
+              ? typeof value === "number" && (integer || value > 10000)
+                ? Math.round(value).toLocaleString()
                 : typeof value === "number"
                   ? value.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 2 })
                   : value

@@ -1,78 +1,76 @@
-import { CheckCircle2, XCircle, Loader2, Clock } from "lucide-react";
+import { useState } from "react";
+import { CheckCircle2, XCircle, Loader2 } from "lucide-react";
+import { format } from "date-fns";
 import { usePolling } from "../hooks/useMetrics";
 import { api } from "../utils/api";
-import { formatDistanceToNow } from "date-fns";
+import ChartCard, { ExportButton } from "./ChartCard";
+import Pager from "./Pager";
+import QualityPanel from "./QualityPanel";
 
-const StatusBadge = ({ status }) => {
-  const styles = {
-    success:   { bg: "var(--green-dim)",  color: "var(--green)", icon: CheckCircle2 },
-    failed:    { bg: "var(--red-dim)",    color: "var(--red)",   icon: XCircle },
-    running:   { bg: "var(--amber-dim)",  color: "var(--amber)", icon: Loader2 },
-    never_run: { bg: "rgba(0,0,0,0.2)",   color: "var(--text-muted)", icon: Clock },
-  };
-  const s = styles[status] || styles.never_run;
-  const Icon = s.icon;
-  return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 4, background: s.bg, color: s.color, borderRadius: 5, padding: "3px 8px", fontSize: 11, fontFamily: "var(--font-mono)", fontWeight: 600 }}>
-      <Icon size={11} />
-      {status}
-    </span>
-  );
+const STATUS = {
+  success: { icon: CheckCircle2, colour: "var(--green)" },
+  failed: { icon: XCircle, colour: "var(--red)" },
+  running: { icon: Loader2, colour: "var(--amber)" },
 };
 
 export default function PipelineLog() {
-  const { data, loading } = usePolling(() => api.getPipelineHistory(), 10_000);
+  const [page, setPage] = useState(1);
+  const { data, loading, error } = usePolling(() => api.getPipelineHistory(page, 10), 20_000, [page]);
   const runs = data?.runs ?? [];
 
   return (
-    <div style={{ animation: "fadeIn 0.4s ease both" }}>
-      <h2 style={{ fontFamily: "var(--font-display)", fontSize: 20, fontWeight: 700, marginBottom: 6 }}>Pipeline Audit Log</h2>
-      <p style={{ color: "var(--text-muted)", fontSize: 13, marginBottom: 24 }}>
-        Every ETL run is recorded — status, records processed, duration, and errors.
-      </p>
-
-      <div className="card" style={{ padding: 0, overflow: "hidden" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-          <thead>
-            <tr style={{ borderBottom: "1px solid var(--border)" }}>
-              {["Pipeline", "Status", "Started", "Duration", "Fetched", "Inserted", "Error"].map(h => (
-                <th key={h} style={{ padding: "12px 16px", textAlign: "left", color: "var(--text-muted)", fontWeight: 600, letterSpacing: "0.06em", fontSize: 10, textTransform: "uppercase", fontFamily: "var(--font-display)", whiteSpace: "nowrap" }}>
-                  {h}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {loading ? (
-              <tr><td colSpan={7} style={{ padding: 24, textAlign: "center", color: "var(--text-muted)" }}>Loading…</td></tr>
-            ) : runs.map((run, i) => (
-              <tr key={run.id} style={{ borderBottom: "1px solid var(--border)", background: i % 2 === 0 ? "transparent" : "rgba(255,255,255,0.01)" }}>
-                <td style={{ padding: "10px 16px", color: "var(--text-secondary)", fontFamily: "var(--font-mono)", fontSize: 11 }}>
-                  {run.display_name}
-                </td>
-                <td style={{ padding: "10px 16px" }}>
-                  <StatusBadge status={run.status} />
-                </td>
-                <td style={{ padding: "10px 16px", color: "var(--text-secondary)", fontFamily: "var(--font-mono)", fontSize: 11 }}>
-                  {run.started_at ? formatDistanceToNow(new Date(run.started_at), { addSuffix: true }) : "—"}
-                </td>
-                <td style={{ padding: "10px 16px", color: run.duration_seconds ? "var(--text-primary)" : "var(--text-muted)", fontFamily: "var(--font-mono)" }}>
-                  {run.duration_seconds !== null ? `${run.duration_seconds.toFixed(1)}s` : "—"}
-                </td>
-                <td style={{ padding: "10px 16px", color: "var(--teal)", fontFamily: "var(--font-mono)" }}>
-                  {run.records_fetched?.toLocaleString() ?? "—"}
-                </td>
-                <td style={{ padding: "10px 16px", color: "var(--green)", fontFamily: "var(--font-mono)" }}>
-                  {run.records_inserted?.toLocaleString() ?? "—"}
-                </td>
-                <td style={{ padding: "10px 16px", color: "var(--red)", fontSize: 11, maxWidth: 240 }}>
-                  <span title={run.error_message}>{run.error_message ? run.error_message.slice(0, 60) + (run.error_message.length > 60 ? "…" : "") : ""}</span>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+    <div className="page">
+      <div>
+        <h2 className="page-title">Pipeline Log</h2>
+        <p className="page-sub">Audit trail of every ETL run: incremental loads, data-quality results and failures</p>
       </div>
+
+      <ChartCard
+        title="ETL Run History" subtitle="Newest first. Incremental loads only insert new periods and update revised values."
+        height={160} loading={loading && !data} error={error && !data ? error : null} empty={!loading && !runs.length}
+        controls={<ExportButton filename="pipeline-runs" rows={runs}
+          columns={[{ key: "started_at", label: "Started" }, { key: "display_name", label: "Pipeline" }, { key: "status", label: "Status" },
+            { key: "mode", label: "Mode" }, { key: "watermark", label: "Watermark" }, { key: "records_fetched", label: "Fetched" },
+            { key: "records_inserted", label: "Inserted" }, { key: "records_updated", label: "Updated" },
+            { key: "records_skipped", label: "Skipped" }, { key: "quality_issues", label: "Quality issues" }, { key: "error_message", label: "Error" }]} />}
+      >
+        <div className="table-scroll">
+          <table className="data-table">
+            <thead>
+              <tr><th>Pipeline</th><th>Status</th><th>Source</th><th>Started</th><th>Watermark</th>
+                <th className="num">Fetched</th><th className="num">New</th><th className="num">Revised</th><th className="num">Dropped</th><th className="num">Issues</th></tr>
+            </thead>
+            <tbody>
+              {runs.map((r) => {
+                const s = STATUS[r.status] ?? STATUS.running;
+                const Icon = s.icon;
+                return (
+                  <tr key={r.id}>
+                    <td>{r.display_name}</td>
+                    <td>
+                      <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: s.colour }}>
+                        <Icon size={13} aria-hidden="true" className={r.status === "running" ? "spin" : undefined} />{r.status}
+                      </span>
+                      {r.error_message && <div title={r.error_message} style={{ fontSize: 11, color: "var(--text-muted)", maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.error_message}</div>}
+                    </td>
+                    <td>{r.mode ? <span className={`pill ${r.mode === "sample" ? "pill-amber" : "pill-green"}`}>{r.mode}</span> : "—"}</td>
+                    <td className="mono">{r.started_at ? format(new Date(r.started_at), "d MMM, HH:mm:ss") : "—"}</td>
+                    <td className="mono">{r.watermark ?? "—"}</td>
+                    <td className="num mono">{r.records_fetched}</td>
+                    <td className="num mono">{r.records_inserted}</td>
+                    <td className="num mono">{r.records_updated}</td>
+                    <td className="num mono">{r.records_skipped}</td>
+                    <td className="num mono">{r.quality_issues}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        <Pager page={data?.page ?? 1} pages={data?.pages ?? 1} total={data?.total ?? 0} onChange={setPage} noun="runs" />
+      </ChartCard>
+
+      <QualityPanel />
     </div>
   );
 }
